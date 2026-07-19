@@ -4,19 +4,64 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / 'data'
 
+# Scalar features use Gaussian similarity (value -> sigma); everything else
+# is a vector feature compared with cosine similarity (dot product of
+# pre-normalized embeddings).
+SCALAR_SIGMAS = {
+    'year': 10.0,
+    'budget': 5.0,
+    'popularity': 20.0,
+}
+
+_FILENAMES = {
+    'description': 'emb_description.npy',
+    'genre': 'emb_genre.npy',
+    'director': 'emb_director.npy',
+    'keywords': 'emb_keywords.npy',
+    'cast': 'emb_cast.npy',
+    'country': 'emb_country.npy',
+    'year': 'emb_year.npy',
+    'budget': 'emb_budget.npy',
+    'popularity': 'emb_popularity.npy',
+}
+
+FEATURE_LABELS = {
+    'description': 'Description',
+    'genre': 'Genre',
+    'director': 'Director',
+    'keywords': 'Keywords',
+    'cast': 'Cast',
+    'country': 'Country',
+    'year': 'Year',
+    'budget': 'Budget',
+    'popularity': 'Popularity',
+}
+
+# Weights are percentages (0-100) that add up to 100; the absolute scale
+# doesn't affect ranking (only relative proportions matter), it's just a
+# more intuitive unit for the /similar weights UI.
+DEFAULT_WEIGHTS = {
+    'description': 40,
+    'genre': 20,
+    'year': 10,
+    'director': 10,
+    'keywords': 10,
+    'cast': 5,
+    'country': 5,
+    'budget': 0,
+    'popularity': 0,
+}
+
 
 def load_data():
-    movies      = pd.read_csv(DATA_DIR / 'movies_clean.csv')
-    emb_desc    = np.load(DATA_DIR / 'emb_description.npy')
-    emb_genre   = np.load(DATA_DIR / 'emb_genre.npy')
-    years       = np.load(DATA_DIR / 'emb_year.npy')
-    emb_director = np.load(DATA_DIR / 'emb_director.npy')
+    movies = pd.read_csv(DATA_DIR / 'movies_clean.csv')
+    features = {name: np.load(DATA_DIR / fname) for name, fname in _FILENAMES.items()}
 
     # Merge imdbId from links.csv so we can build IMDB links in the bot
     links = pd.read_csv(DATA_DIR / 'links.csv', dtype={'imdbId': str})
     movies = movies.merge(links[['movieId', 'imdbId']], on='movieId', how='left')
 
-    return movies, emb_desc, emb_genre, years, emb_director
+    return movies, features
 
 
 def imdb_url(imdb_id) -> str:
@@ -33,35 +78,39 @@ def find_matches(movies: pd.DataFrame, query: str, n: int = 5) -> pd.DataFrame:
 
 def find_similar(
     movies: pd.DataFrame,
-    emb_desc: np.ndarray,
-    emb_genre: np.ndarray,
-    years: np.ndarray,
-    emb_director: np.ndarray,
+    features: dict,
     idx: int,
-    w_desc: float = 0.4,
-    w_genre: float = 0.3,
-    w_year: float = 0.2,
-    w_director: float = 0.1,
-    year_sigma: float = 10.0,
+    weights: dict = None,
+    year_range: tuple = None,
     k: int = 10,
 ) -> pd.DataFrame:
     """
     Return top-k movies most similar to movies.iloc[idx].
-    Similarity is a weighted sum of four independent signals:
-      - description cosine similarity (MiniLM embeddings)
-      - genre cosine similarity (multi-hot)
-      - year Gaussian similarity (sigma in years)
-      - director cosine similarity (genre profile)
+    `weights` maps feature name -> weight (see DEFAULT_WEIGHTS for the
+    available names). Vector features are compared with cosine similarity,
+    scalar features (year, budget, popularity) with Gaussian similarity.
+    `year_range`, if given, is a (min_year, max_year) hard filter: movies
+    outside it are excluded from the candidates entirely, regardless of
+    weights.
     """
-    year_sim = np.exp(-((years - years[idx]) ** 2) / (2 * year_sigma ** 2))
+    weights = weights or DEFAULT_WEIGHTS
+    scores = np.zeros(len(movies), dtype=np.float32)
 
-    scores = (
-        w_desc     * (emb_desc     @ emb_desc[idx])     +
-        w_genre    * (emb_genre    @ emb_genre[idx])    +
-        w_year     * year_sim                           +
-        w_director * (emb_director @ emb_director[idx])
-    )
+    for name, w in weights.items():
+        if w == 0:
+            continue
+        emb = features[name]
+        if name in SCALAR_SIGMAS:
+            sigma = SCALAR_SIGMAS[name]
+            scores += w * np.exp(-((emb - emb[idx]) ** 2) / (2 * sigma ** 2))
+        else:
+            scores += w * (emb @ emb[idx])
+
+    if year_range is not None:
+        lo, hi = year_range
+        out_of_range = (features['year'] < lo) | (features['year'] > hi)
+        scores[out_of_range] = -1
+
     scores[idx] = -1  # exclude the query movie itself
-
     top_k = np.argsort(scores)[::-1][:k]
     return movies.iloc[top_k]
