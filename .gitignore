@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+.ipynb_checkpoints/
+
+# Datasets and generated artifacts (large, and MovieLens forbids redistribution — see data/README.txt)
+data/
